@@ -1,195 +1,131 @@
-
+"""Excel writer with an audit trail and explicit extra-field decisions."""
+import os
+import tempfile
 from pathlib import Path
 from openpyxl import Workbook
-from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+from openpyxl.cell import WriteOnlyCell
+from openpyxl.cell.cell import ILLEGAL_CHARACTERS_RE
+from openpyxl.styles import Font, PatternFill, Alignment
 from openpyxl.utils import get_column_letter
+from validator import validate_tsv, resolve_row
 
-from validator import validate_tsv
+MAX_ROWS=1048576
+MAX_COLS=16384
 
+def safe_text(v):
+    s=str(v)
+    if len(s.encode('utf-16-le'))//2>32767 or ILLEGAL_CHARACTERS_RE.search(s):
+        raise ValueError('Excel cannot store a cell losslessly (too long or illegal control character). No existing output was changed.')
+    return s
 
-def convert_tsv_to_excel(
-    file_path=None,
-    text=None,
-    output_path=None
-):
-    """
-    Convert validated TSV data into a formatted Excel workbook.
-
-    Returns:
-        Dictionary containing output file, records and columns.
-    """
-
-    # Step 1: Validate input
-    result = validate_tsv(
-        file_path=file_path,
-        text=text
-    )
-
-    if not result["valid"]:
-
-        error_message = "\n".join(result["errors"])
-
-        raise ValueError(
-            "TSV validation failed:\n\n" + error_message
-        )
-
-    headers = result["headers"]
-    rows = result["rows"]
-
-    # Step 2: Check Excel limits
-    if len(headers) > 16384:
-        raise ValueError("Excel supports a maximum of 16,384 columns.")
-
-    if len(rows) + 1 > 1048576:
-        raise ValueError("Excel supports a maximum of 1,048,576 rows.")
-
-    for row_number, row in enumerate([headers] + rows, start=1):
-        for column_number, value in enumerate(row, start=1):
-            if len(value) > 32767:
-                raise ValueError(
-                    f"Cell at row {row_number}, column "
-                    f"{column_number} exceeds Excel's "
-                    "32,767-character cell limit."
-                )
-
-    # Step 3: Determine output location
-    if output_path:
-
-        output_file = Path(output_path)
-
-    elif file_path:
-
-        output_file = Path(file_path).with_suffix(".xlsx")
-
-    else:
-
-        raise ValueError(
-            "Please provide an output path when using pasted data."
-        )
-
-    if output_file.suffix.lower() != ".xlsx":
-        raise ValueError("Output file must have an .xlsx extension.")
-
-    output_file.parent.mkdir(
-        parents=True,
-        exist_ok=True
-    )
-
-    # Step 4: Create workbook
-    workbook = Workbook()
-
-    worksheet = workbook.active
-    worksheet.title = "Data"
-
-    # Step 5: Write headers
-    worksheet.append(headers)
-
-    # Step 6: Write data without changing values
-    for row in rows:
-
-        worksheet.append(row)
-
-    # Step 7: Format headers
-    header_fill = PatternFill(
-        fill_type="solid",
-        fgColor="217346"
-    )
-
-    header_font = Font(
-        name="Arial",
-        size=10,
-        bold=True,
-        color="FFFFFF"
-    )
-
-    for cell in worksheet[1]:
-
-        cell.fill = header_fill
-        cell.font = header_font
-
-        cell.data_type = "s"
-        cell.number_format = "@"
-
-        cell.alignment = Alignment(
-            horizontal="center",
-            vertical="center",
-            wrap_text=True
-        )
-
-    worksheet.row_dimensions[1].height = 30
-
-    # Step 8: Preserve all values as text
-    for row in worksheet.iter_rows(min_row=2):
-
-        for cell in row:
-
-            cell.data_type = "s"
-            cell.number_format = "@"
-
-            cell.font = Font(
-                name="Arial",
-                size=10
-            )
-
-            cell.alignment = Alignment(
-                vertical="top",
-                wrap_text=True
-            )
-
-    # Step 9: Automatically adjust column widths
-    for column_number, header in enumerate(headers, start=1):
-
-        max_length = len(str(header))
-
+def export_result(result, output_path, decisions=None, extra_headers='keep'):
+    if not result['valid']: raise ValueError('\n'.join(result['errors']))
+    if extra_headers not in ('keep','separate','discard'): raise ValueError('Invalid extra-column policy.')
+    decisions=decisions or {}
+    valid_lines={r['line'] for r in result['review'] if not r.get('unparsed')}
+    if set(decisions)-valid_lines: raise ValueError('Unknown or unparsed review row in decisions.')
+    headers=result['headers']; extra=set(result['extra_columns']); keep=[i for i in range(len(headers)) if extra_headers=='keep' or i not in extra]
+    data=[]; pending=[]; extras=[]; audit=[]; original=[]; suggestions=[]
+    for r in result['accepted']: data.append((r['line'],r['row']))
+    for r in result['review']:
+        line=r['line']; decision=decisions.get(line)
+        if decision is None:
+            pending.append(r)
+            if r['suggestion'] is not None:
+                for i,v in enumerate(r['suggestion']): suggestions.append([line,i+1,headers[i],v])
+            continue
+        d=resolve_row(r,decision['mapping'],len(headers),decision.get('discard',False))
+        data.append((line,d['row']))
+        audit.append([line,'Approved mapping',r['reason']])
+        for target,source in enumerate(d['mapping']):
+            audit.append([line,f'Output {target+1}: {headers[target]}',f'Original field {source+1}' if source is not None else 'Inserted blank'])
+        dropped={j for j,_ in d['extras']} if d['discard'] else set()
+        for i,v in enumerate(r['raw'],1):
+            if i in dropped:
+                audit.append([line,f'Field {i}','Discarded by explicit user approval']); continue
+            original.append([line,i,v])
+        if not d['discard']:
+            extras.extend([line,f'Original field {i}',v] for i,v in d['extras'])
+    data.sort(key=lambda x:x[0])
+    if extra_headers!='keep':
+        omit_original=set()
+        for line,row in data:
+            for i in sorted(extra):
+                if extra_headers=='separate': extras.append([line,headers[i],row[i]])
+                # Do not retain explicitly discarded header values in original repair audit.
+                else:
+                    decision=decisions.get(line)
+                    if decision and decision['mapping'][i] is not None:
+                        source=decision['mapping'][i]+1
+                        omit_original.add((line,source))
+        if omit_original: original=[x for x in original if (x[0],x[1]) not in omit_original]
+        audit.append(['','Extra header policy',extra_headers])
+    wb=Workbook(write_only=True)
+    green=PatternFill('solid',fgColor='217346'); yellow=PatternFill('solid',fgColor='FFF2CC'); white=Font(bold=True,color='FFFFFF'); dark=Font(bold=True,color='713F12'); align=Alignment(vertical='top',wrap_text=True)
+    def sheet(name, hs, rows, highlighted=(), all_highlight=False):
+        if not hs or len(hs)>MAX_COLS: raise ValueError(f'{name}: exceeds Excel column limit ({MAX_COLS}).')
+        ws=None; count=MAX_ROWS; part=0
+        def new():
+            nonlocal ws,count,part
+            part+=1; title=name if part==1 else f'{name[:24]} {part}'
+            ws=wb.create_sheet(title); ws.freeze_panes='A2'
+            for j,h in enumerate(hs,1): ws.column_dimensions[get_column_letter(j)].width=min(55,max(14,len(str(h))+3, 32 if 'value' in str(h).lower() else 0))
+            count=1; append(hs,True)
+        def append(row,head=False):
+            cells=[]
+            for j,v in enumerate(row):
+                c=WriteOnlyCell(ws,value=safe_text(v)); c.data_type='s'; c.number_format='@'; c.alignment=align
+                if head: c.fill=yellow if all_highlight or j in highlighted else green; c.font=dark if all_highlight or j in highlighted else white
+                elif all_highlight or j in highlighted: c.fill=yellow
+                cells.append(c)
+            ws.append(cells)
+        def finish():
+            if ws is not None: ws.auto_filter.ref=f'A1:{get_column_letter(len(hs))}{count}'; ws.close()
+        new()
         for row in rows:
-            max_length = max(
-                max_length,
-                len(str(row[column_number - 1]))
-            )
-
-        worksheet.column_dimensions[
-            get_column_letter(column_number)
-        ].width = min(max_length + 3, 60)
-
-    # Step 10: Excel usability settings
-    worksheet.freeze_panes = "A2"
-
-    worksheet.auto_filter.ref = worksheet.dimensions
-
-    worksheet.sheet_view.showGridLines = True
-
-    # Step 11: Save workbook
-    workbook.save(output_file)
-
-    return {
-        "success": True,
-        "output_file": str(output_file.resolve()),
-        "records": len(rows),
-        "columns": len(headers),
-        "warnings": result["warnings"]
-    }
-
-
-if __name__ == "__main__":
-
+            if count==MAX_ROWS: finish(); new()
+            append(row); count+=1
+        finish()
+    # Audit fields stored in long form so arbitrary extra field counts do not overflow a sheet.
+    # Escape only unsupported controls in review data and split large fields with explicit part numbers.
+    def long_rows(rows):
+        for line,field,value in rows:
+            s=str(value); encoding='literal'
+            if ILLEGAL_CHARACTERS_RE.search(s):
+                import json
+                s=json.dumps(s,ensure_ascii=True); encoding='JSON string'
+            # 15000 codepoints <= 30000 UTF-16 units, even for astral chars.
+            parts=[s[i:i+15000] for i in range(0,len(s),15000)] or ['']
+            for i,p in enumerate(parts,1): yield [line,field,i,len(parts),encoding,p]
+    output=Path(output_path).resolve()
+    if output.suffix.lower()!='.xlsx': raise ValueError('Choose an .xlsx filename.')
+    temp=None
     try:
+        # Check clean cells before opening write-only streams.
+        for h in [headers[i] for i in keep]: safe_text(h)
+        for _,row in data:
+            for i in keep: safe_text(row[i])
+        sheet('Data',[headers[i] for i in keep],([row[i] for i in keep] for _,row in data),[j for j,i in enumerate(keep) if i in extra])
+        sheet('Summary',['Item','Value'],[['Mode',result['mode']],['Exported records',len(data)],['Pending records',len(pending)],['Approved repairs',len(decisions)],['Extra column policy',extra_headers],['Notice','Data includes structurally accepted rows and approved mappings. It does not certify factual accuracy.'],*([['Warning',w] for w in result['warnings'] if len(w)<30000])])
+        if pending:
+            sheet('Review Index',['Source line','Field count','Reason'],([r['line'],len(r['raw']),r['reason']] for r in pending),all_highlight=True)
+            sheet('Needs Review',['Source line','Original field','Part','Total parts','Encoding','Original value'],long_rows((r['line'],i,v) for r in pending for i,v in enumerate(r['raw'],1)),all_highlight=True)
+        if extras: sheet('Extra Fields',['Source line','Field','Part','Total parts','Encoding','Original value'],long_rows(extras),all_highlight=True)
+        if original: sheet('Original Repairs',['Source line','Original field','Part','Total parts','Encoding','Original value'],long_rows(original),all_highlight=True)
+        if audit: sheet('Repair Report',['Source line','Action','Details'],audit)
+        if suggestions: sheet('Suggested Repairs',['Source line','Field','Part','Total parts','Encoding','Suggested value'],long_rows((line,f'{i}: {h}',v) for line,i,h,v in suggestions),all_highlight=True)
+        sheet('Original Headers',['Source line','Original field','Part','Total parts','Encoding','Header value'],long_rows((result.get('header_line',1),i,h) for i,h in enumerate(result['source_headers'],1)))
+        sheet('Data Line Map',['Excel record number','Source line'],([i,line] for i,(line,_) in enumerate(data,1)))
+        with tempfile.NamedTemporaryFile(dir=output.parent,suffix='.xlsx',delete=False) as f: temp=f.name
+        wb.save(temp); os.replace(temp,output)
+    finally:
+        wb.close()
+        if temp and os.path.exists(temp): os.unlink(temp)
+    return {'output_file':str(output),'records':len(data),'review_count':len(pending),'repair_count':len(decisions),'extra_count':len(extras),'columns':len(keep)}
 
-        result = convert_tsv_to_excel(
-            file_path="test_data.txt"
-        )
-
-        print("\nConversion Successful!")
-        print("----------------------")
-        print("Records:", result["records"])
-        print("Columns:", result["columns"])
-        print("Excel:", result["output_file"])
-
-        if result["warnings"]:
-            print("\nWarnings:")
-            for warning in result["warnings"]:
-                print("-", warning)
-
-    except Exception as e:
-
-        print("\nConversion Failed!")
-        print(e)
+def convert_tsv_to_excel(file_path=None,text=None,output_path=None,mode='business',decisions=None,extra_headers='keep'):
+    r=validate_tsv(file_path=file_path,text=text,mode=mode)
+    if output_path is None:
+        if file_path is None: raise ValueError('Choose an output filename.')
+        output_path=Path(file_path).with_suffix('.xlsx')
+    return export_result(r,output_path,decisions,extra_headers)

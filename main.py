@@ -3,7 +3,8 @@ import sys
 import ctypes
 from pathlib import Path
 
-from PyQt5.QtWidgets import QApplication
+from PyQt5.QtWidgets import QApplication, QPushButton
+from PyQt5.QtCore import Qt
 from PyQt5.QtGui import QIcon, QPixmap
 
 from gui import MainWindow
@@ -38,6 +39,10 @@ def main():
 
     window = MainWindow()
     window.setWindowIcon(icon)
+        # Pointing hand cursor for buttons
+    for button in window.findChildren(QPushButton):
+        button.setCursor(Qt.PointingHandCursor)
+
     window.show()
 
     sys.exit(app.exec_())
