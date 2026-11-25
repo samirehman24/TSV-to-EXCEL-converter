@@ -1,49 +1,5 @@
+STANDARD_COLUMNS = ['Name', 'Description', 'OperatingModel', 'ServiceCategories', 'LicType', 'LicNumber', 'LicStatus', 'LicIssuedOn', 'LicExpiresOn', 'LicVerifiedOn', 'InsType', 'InsVerifiedOn', 'ServiceSpecialities', 'ServiceAreas', 'Locations', 'Hours', 'EmergencyAvailability', 'EmergencyNumber', 'AddrLine1', 'AddrLine2', 'AddrCity', 'AddrState', 'AddrZipCode', 'AddrCounty', 'Phone', 'Website', 'Email', 'LastResearchedOn']
 
-STANDARD_COLUMNS = [
-    "Name",
-    "Description",
-    "OperatingModel",
-    "ServiceCategories",
-    "LicType",
-    "LicNumber",
-    "LicStatus",
-    "LicIssuedOn",
-    "LicExpiresOn",
-    "LicVerifiedOn",
-    "InsType",
-    "InsVerifiedOn",
-    "ServiceSpecialities",
-    "ServiceAreas",
-    "Locations",
-    "Hours",
-    "EmergencyAvailability",
-    "EmergencyNumber",
-    "AddrLine1",
-    "AddrLine2",
-    "AddrCity",
-    "AddrState",
-    "AddrZipCode",
-    "AddrCounty",
-    "Phone",
-    "Website",
-    "Email",
-    "LastResearchedOn"
-]
+COLUMN_ALIASES = {'CompanyName': 'Name', 'BusinessName': 'Name', 'City': 'AddrCity', 'State': 'AddrState', 'ZipCode': 'AddrZipCode', 'County': 'AddrCounty', 'Address': 'AddrLine1', 'PhoneNumber': 'Phone', 'LicenseNumber': 'LicNumber', 'LicenseType': 'LicType', 'LicenseStatus': 'LicStatus', 'ServiceSpecialties': 'ServiceSpecialities'}
 
-
-COLUMN_ALIASES = {
-    "CompanyName": "Name",
-    "BusinessName": "Name",
-    "City": "AddrCity",
-    "State": "AddrState",
-    "ZipCode": "AddrZipCode",
-    "County": "AddrCounty",
-    "Address": "AddrLine1",
-    "PhoneNumber": "Phone",
-    "LicenseNumber": "LicNumber",
-    "LicenseType": "LicType",
-    "LicenseStatus": "LicStatus",
-    "ServiceSpecialties": "ServiceSpecialities"
-}
-
-
+COLUMN_ALIASES.update({'Company':'Name','Business':'Name','Business Name':'Name','Postal Code':'AddrZipCode','ZIP':'AddrZipCode','Street Address':'AddrLine1','Address 1':'AddrLine1','Address 2':'AddrLine2','Province':'AddrState','Telephone':'Phone','Business Phone':'Phone','URL':'Website','Email Address':'Email','Licence Number':'LicNumber','Licence Type':'LicType','Licence Status':'LicStatus','Business Hours':'Hours','Opening Hours':'Hours','Service Area':'ServiceAreas','Specialties':'ServiceSpecialities','Last Researched':'LastResearchedOn'})
